@@ -1,5 +1,6 @@
 package com.alvin.jdtoptimizer;
 
+import com.alvin.jdtoptimizer.cache.ConfigCache;
 import com.alvin.jdtoptimizer.network.FePerTickOverrideHandler;
 import com.alvin.jdtoptimizer.network.FePerTickOverridePayload;
 import net.neoforged.bus.api.IEventBus;
@@ -24,6 +25,7 @@ public final class JDTOptimizer {
 
     public JDTOptimizer(IEventBus modEventBus) {
         modEventBus.addListener(JDTOptimizer::registerPayloads);
+        ConfigCache.register(modEventBus);
         LOGGER.info("JDT Optimizer loaded. Mixin patches will be applied to Just Dire Things at class load.");
     }
 

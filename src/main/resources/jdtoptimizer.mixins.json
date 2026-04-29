@@ -15,6 +15,9 @@
     "jdt.EntityEventsMixin",
     "jdt.FluidCollectorT2BEMixin",
     "jdt.FluidPlacerT2BEMixin",
+    "jdt.GeneratorFluidT1BEMixin",
+    "jdt.GeneratorT1BEMixin",
+    "jdt.PortalEntityMixin",
     "jdt.PoweredMachineBEMixin",
     "jdt.RedstoneControlledBEMixin"
   ],

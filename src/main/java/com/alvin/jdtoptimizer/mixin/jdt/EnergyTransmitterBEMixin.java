@@ -1,6 +1,8 @@
 package com.alvin.jdtoptimizer.mixin.jdt;
 
 import com.alvin.jdtoptimizer.api.IFePerTickOverride;
+import com.alvin.jdtoptimizer.cache.ConfigCache;
+import com.alvin.jdtoptimizer.cache.Directions;
 import com.direwolf20.justdirethings.common.blockentities.EnergyTransmitterBE;
 import com.direwolf20.justdirethings.common.blockentities.basebe.AreaAffectingBE;
 import com.direwolf20.justdirethings.common.blockentities.basebe.BaseMachineBE;
@@ -91,10 +93,6 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE implements 
     // @Shadow does not resolve interface defaults, so we cast through (Object) at each call site.
     // The runtime target EnergyTransmitterBE implements both interfaces, so the cast is safe.
 
-    /** {@code Direction.values()} clones its array on every call; cache once. */
-    @Unique
-    private static final Direction[] jdtopt$DIRECTIONS = Direction.values();
-
     /**
      * Per-transmitter FE/tick override. {@link IFePerTickOverride#NO_OVERRIDE} (-1) means
      * "use config default"; any positive value is used as the per-tick cap for this
@@ -129,13 +127,38 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE implements 
     /**
      * Hot-path replacement. Reads a direct int field and branches once, avoiding the
      * config-map lookup in {@link Config#ENERGY_TRANSMITTER_T1_RF_PER_TICK} when an
-     * override is set.
+     * override is set. When no override is set we route through {@link ConfigCache}
+     * so the shared-default case is also a volatile read instead of a NightConfig
+     * traversal.
      */
     @Overwrite
     public int fePerTick() {
         int override = this.jdtopt$fePerTickOverride;
         if (override > 0) return override;
-        return Config.ENERGY_TRANSMITTER_T1_RF_PER_TICK.get();
+        return ConfigCache.transmitterFePerTick();
+    }
+
+    /**
+     * Drops {@code Config.ENERGY_TRANSMITTER_T1_MAX_RF.get()} in favour of the cached
+     * volatile. Called from {@code TransmitterEnergyStorage} construction and from any
+     * energy-bar UI query — low frequency individually but trivially free to cache.
+     */
+    @Overwrite
+    public int getMaxEnergy() {
+        return ConfigCache.transmitterMaxRf();
+    }
+
+    /**
+     * Re-implements {@code calculateLoss} with a cached loss coefficient. Called once
+     * per target per tick from {@code transmitPowerWithLoss} — on a packed network with
+     * many receivers this adds up. Math semantics are identical: vanilla does
+     * {@code amtToSend - (int) Math.floor(amtToSend * energyLoss)}, so do we.
+     */
+    @Overwrite
+    public int calculateLoss(int amtToSend, BlockPos remotePosition) {
+        double energyLoss = (ConfigCache.transmitterLossPerBlock()
+                * Math.abs(getBlockPos().distManhattan(remotePosition))) / 100.0;
+        return amtToSend - (int) Math.floor(amtToSend * energyLoss);
     }
 
     /**
@@ -332,7 +355,7 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE implements 
             if (blockState.isAir() || level.getBlockEntity(blockPos) == null) continue;
 
             boolean foundAcceptableSide = false;
-            for (Direction direction : jdtopt$DIRECTIONS) {
+            for (Direction direction : Directions.VALUES) {
                 IEnergyStorage cap = level.getCapability(Capabilities.EnergyStorage.BLOCK, blockPos, direction);
                 if (cap != null && cap.canReceive()) {
                     foundAcceptableSide = true;

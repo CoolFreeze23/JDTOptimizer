@@ -2,19 +2,29 @@ package com.alvin.jdtoptimizer.mixin.jdt;
 
 import com.alvin.jdtoptimizer.api.IJdtOptBlockStateFilterCache;
 import com.alvin.jdtoptimizer.api.IJdtOptSlotCapCache;
+import com.alvin.jdtoptimizer.cache.Directions;
 import com.direwolf20.justdirethings.common.blockentities.basebe.BaseMachineBE;
 import it.unimi.dsi.fastutil.objects.Reference2ByteOpenHashMap;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.energy.IEnergyStorage;
 import net.neoforged.neoforge.items.ItemStackHandler;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+import java.util.Map;
 
 /**
  * Adds two pieces of per-BE caching to {@link BaseMachineBE}:
@@ -64,6 +74,20 @@ public abstract class BaseMachineBEMixin implements IJdtOptSlotCapCache, IJdtOpt
     private final Reference2ByteOpenHashMap<BlockState> jdtopt$blockStateFilterCache =
             new Reference2ByteOpenHashMap<>(64);
 
+    /**
+     * Last game tick at which {@code chunkTestCache} was cleared. Starts at
+     * {@link Long#MIN_VALUE} so the very first {@code clearProtectionCache()} call always
+     * trips the threshold and clears.
+     */
+    @Unique
+    private long jdtopt$lastChunkCacheClear = Long.MIN_VALUE;
+
+    @Shadow
+    protected Map<ChunkPos, Boolean> chunkTestCache;
+
+    @Shadow
+    protected int direction;
+
     @Inject(method = "getMachineHandler", at = @At("HEAD"), cancellable = true)
     private void jdtopt$returnCachedMachineHandler(CallbackInfoReturnable<ItemStackHandler> cir) {
         ItemStackHandler cached = this.jdtopt$cachedMachineHandler;
@@ -110,6 +134,49 @@ public abstract class BaseMachineBEMixin implements IJdtOptSlotCapCache, IJdtOpt
         // "BE marked dirty but nobody ever populated our cache" case.
         if (!this.jdtopt$blockStateFilterCache.isEmpty()) {
             this.jdtopt$blockStateFilterCache.clear();
+        }
+    }
+
+    /**
+     * TTL-throttled {@code chunkTestCache} clearing. Upstream unconditionally clears on
+     * every {@code tickServer()}, which makes the cache useless for anything other than
+     * the single {@code findXxx} scan within one tick.
+     *
+     * <p>For area machines the scan re-runs every {@code tickSpeed} ticks (20 by default),
+     * and chunk-protection claims don't flip on a sub-second cadence in practice. We
+     * therefore keep the cache valid for up to {@value JDTOPT$CHUNK_CACHE_TTL_TICKS}
+     * ticks between forced clears, which still gives a player at most a 2-second window
+     * where a JDT machine could act on a stale protection verdict — the same window
+     * they already have today if they edit permissions mid-tick.
+     *
+     * <p>If the level isn't available or the BE is client-side, we fall back to the
+     * original behaviour (always clear) to stay safe.
+     */
+    @Unique
+    private static final long JDTOPT$CHUNK_CACHE_TTL_TICKS = 40L;
+
+    /**
+     * Allocation-free replacement for {@code getDirectionValue()}. Original:
+     * {@code return Direction.values()[direction];} — one 6-element array clone per
+     * call. Swapping to the shared static reads is a straight win with zero behavioural
+     * impact since the returned {@link Direction} value is identical.
+     */
+    @Overwrite
+    public Direction getDirectionValue() {
+        return Directions.VALUES[this.direction];
+    }
+
+    @Overwrite
+    public void clearProtectionCache() {
+        Level lvl = ((BlockEntity) (Object) this).getLevel();
+        if (lvl == null) {
+            this.chunkTestCache.clear();
+            return;
+        }
+        long now = lvl.getGameTime();
+        if (now - this.jdtopt$lastChunkCacheClear >= JDTOPT$CHUNK_CACHE_TTL_TICKS) {
+            this.chunkTestCache.clear();
+            this.jdtopt$lastChunkCacheClear = now;
         }
     }
 }
