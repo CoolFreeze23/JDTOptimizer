@@ -12,6 +12,7 @@
     "jdt.BlockSwapperT2BEMixin",
     "jdt.ClickerT2BEMixin",
     "jdt.EnergyTransmitterBEMixin",
+    "jdt.EntityEventsMixin",
     "jdt.FluidCollectorT2BEMixin",
     "jdt.FluidPlacerT2BEMixin",
     "jdt.PoweredMachineBEMixin",

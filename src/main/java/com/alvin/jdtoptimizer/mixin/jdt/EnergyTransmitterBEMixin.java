@@ -341,8 +341,25 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE implements 
             }
             if (!foundAcceptableSide) continue;
 
-            ItemStack blockItemStack = blockState.getBlock().getCloneItemStack(level, blockPos, blockState);
-            if (!((FilterableBE) (Object) this).isStackValidFilter(blockItemStack)) continue;
+            // BlockState-keyed filter fast path (see BaseMachineBEMixin / §2.1).
+            // The filter result is pure-functionally determined by the interned
+            // BlockState here (getCloneItemStack takes level/pos but produces the
+            // same ItemStack for the same block+state combo), so caching by state
+            // identity is a zero-allocation substitute for the per-block clone+key
+            // lookup. The cache invalidates in lockstep with JDT's own
+            // FilterData.filterCache via BaseMachineBE.setChanged() TAIL injection.
+            com.alvin.jdtoptimizer.api.IJdtOptBlockStateFilterCache filterCache =
+                    (com.alvin.jdtoptimizer.api.IJdtOptBlockStateFilterCache) (Object) this;
+            byte cached = filterCache.jdtopt_getCachedFilter(blockState);
+            boolean passesFilter;
+            if (cached != com.alvin.jdtoptimizer.api.IJdtOptBlockStateFilterCache.MISS) {
+                passesFilter = cached == com.alvin.jdtoptimizer.api.IJdtOptBlockStateFilterCache.TRUE;
+            } else {
+                ItemStack blockItemStack = blockState.getBlock().getCloneItemStack(level, blockPos, blockState);
+                passesFilter = ((FilterableBE) (Object) this).isStackValidFilter(blockItemStack);
+                filterCache.jdtopt_cacheFilter(blockState, passesFilter);
+            }
+            if (!passesFilter) continue;
 
             if (blockState.getBlock() instanceof EnergyTransmitter) {
                 this.transmitters.add(blockPos);
