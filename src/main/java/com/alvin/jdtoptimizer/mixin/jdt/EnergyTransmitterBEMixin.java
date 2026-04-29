@@ -1,7 +1,9 @@
 package com.alvin.jdtoptimizer.mixin.jdt;
 
 import com.direwolf20.justdirethings.common.blockentities.EnergyTransmitterBE;
+import com.direwolf20.justdirethings.common.blockentities.basebe.AreaAffectingBE;
 import com.direwolf20.justdirethings.common.blockentities.basebe.BaseMachineBE;
+import com.direwolf20.justdirethings.common.blockentities.basebe.FilterableBE;
 import com.direwolf20.justdirethings.common.blocks.EnergyTransmitter;
 import com.direwolf20.justdirethings.common.capabilities.TransmitterEnergyStorage;
 import net.minecraft.core.BlockPos;
@@ -71,10 +73,10 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
     @Shadow public abstract int transmitPowerWithLoss(IEnergyStorage sender, IEnergyStorage receiver, int amtToSend, BlockPos remotePosition);
     @Shadow public abstract void doParticles(BlockPos sourcePos, BlockPos targetPos);
     @Shadow public abstract void balanceEnergy();
-    // isStackValidFilter is a default method on FilterableBE. Shadow the one inherited by the target.
-    @Shadow public abstract boolean isStackValidFilter(ItemStack testStack);
-    // getAABB is a default method on AreaAffectingBE.
-    @Shadow public abstract AABB getAABB(BlockPos relativePos);
+
+    // isStackValidFilter and getAABB are DEFAULT METHODS on FilterableBE / AreaAffectingBE.
+    // @Shadow does not resolve interface defaults, so we cast through (Object) at each call site.
+    // The runtime target EnergyTransmitterBE implements both interfaces, so the cast is safe.
 
     /** {@code Direction.values()} clones its array on every call; cache once. */
     @Unique
@@ -141,12 +143,23 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
     }
 
     /**
-     * Same as the original providePower but skips {@link #balanceEnergy()} when no energy
-     * moved. Without any outflow the network can't have become newly unbalanced this tick,
-     * so the balance pass (and its particle packets) is pure overhead.
+     * Same as the original providePower but with two cosmetic-correctness improvements:
+     *
+     * <ol>
+     *   <li><b>Skip full receivers before attempting transfer.</b> The original code would
+     *       still call {@code transmitPowerWithLoss} on receivers at max capacity, and if the
+     *       receiver was at e.g. 9,999/10,000 FE it would happily accept 1 FE per tick and
+     *       trigger a particle beam every tick — visually indistinguishable from "full but
+     *       receiving particles for no reason". Checking {@code getEnergyStored >= getMaxEnergyStored}
+     *       up front short-circuits that entirely: no transfer, no particle, no wasted work.</li>
+     *   <li><b>Skip {@code balanceEnergy()} when no energy moved.</b> Without any outflow the
+     *       network can't have become newly unbalanced this tick, so the balance pass
+     *       (and its particle packets to other transmitters) is pure overhead.</li>
+     * </ol>
      *
      * <p>Loss / distance / filter handling is unchanged — we re-use the shadowed
-     * {@code transmitPowerWithLoss} and {@code doParticles}.
+     * {@code transmitPowerWithLoss} and {@code doParticles}. Energy throughput is unchanged
+     * for receivers that actually need power.
      */
     @Overwrite
     public void providePower() {
@@ -160,6 +173,12 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
         for (BlockPos blockPos : this.blocksToCharge) {
             IEnergyStorage receiver = getHandler(blockPos);
             if (receiver == null) continue;
+
+            // Fix: skip receivers that are already at capacity. The stock code only gated
+            // particles on "sentAmt > 0", which still fires for near-full receivers that
+            // accept a trickle every tick.
+            if (receiver.getEnergyStored() >= receiver.getMaxEnergyStored()) continue;
+
             int sentAmt = transmitPowerWithLoss(sender, receiver, perTick, blockPos);
             if (sentAmt > 0) {
                 anyMoved = true;
@@ -188,7 +207,7 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
         final BlockPos selfPos = getBlockPos();
         this.transmitters.add(selfPos);
 
-        final AABB area = getAABB(selfPos);
+        final AABB area = ((AreaAffectingBE) (Object) this).getAABB(selfPos);
         final int minX = (int) area.minX, minY = (int) area.minY, minZ = (int) area.minZ;
         final int maxX = (int) area.maxX - 1, maxY = (int) area.maxY - 1, maxZ = (int) area.maxZ - 1;
 
@@ -215,7 +234,7 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
             if (!foundAcceptableSide) continue;
 
             ItemStack blockItemStack = blockState.getBlock().getCloneItemStack(level, blockPos, blockState);
-            if (!isStackValidFilter(blockItemStack)) continue;
+            if (!((FilterableBE) (Object) this).isStackValidFilter(blockItemStack)) continue;
 
             if (blockState.getBlock() instanceof EnergyTransmitter) {
                 this.transmitters.add(blockPos);
