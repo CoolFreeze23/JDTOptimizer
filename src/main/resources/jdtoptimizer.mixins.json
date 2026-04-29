@@ -10,7 +10,9 @@
     "jdt.EnergyTransmitterBEMixin",
     "jdt.FluidCollectorT2BEMixin"
   ],
-  "client": [],
+  "client": [
+    "jdt.EnergyTransmitterScreenMixin"
+  ],
   "server": [],
   "injectors": {
     "defaultRequire": 1

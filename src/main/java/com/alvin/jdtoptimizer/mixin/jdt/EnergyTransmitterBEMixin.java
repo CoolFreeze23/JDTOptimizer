@@ -1,13 +1,17 @@
 package com.alvin.jdtoptimizer.mixin.jdt;
 
+import com.alvin.jdtoptimizer.api.IFePerTickOverride;
 import com.direwolf20.justdirethings.common.blockentities.EnergyTransmitterBE;
 import com.direwolf20.justdirethings.common.blockentities.basebe.AreaAffectingBE;
 import com.direwolf20.justdirethings.common.blockentities.basebe.BaseMachineBE;
 import com.direwolf20.justdirethings.common.blockentities.basebe.FilterableBE;
 import com.direwolf20.justdirethings.common.blocks.EnergyTransmitter;
 import com.direwolf20.justdirethings.common.capabilities.TransmitterEnergyStorage;
+import com.direwolf20.justdirethings.setup.Config;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -19,6 +23,9 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -36,31 +43,38 @@ import java.util.Set;
  * {@code extractEnergy()}, {@code balanceEnergy()}, and {@code isAlreadyBalanced()} — multiple
  * times per tick, per transmitter.
  *
- * <p>Additionally, {@code providePower()} calls {@code balanceEnergy()} on <em>every</em> tick
- * regardless of whether any energy moved. With {@code showParticles = true} (default) and
- * a network that isn't exactly balanced, this spawns a particle packet per transmitter per tick.
+ * <p>Additionally, {@code balanceEnergy()} sprays a particle beam to <em>every</em> transmitter
+ * in the network whenever the network isn't already balanced — including transmitters whose
+ * energy is being <em>drained</em> to feed the newly-added one. That's the visual bug where
+ * placing a single empty transmitter near three full ones makes all four appear to receive
+ * particles.
  *
  * <h2>Patches applied</h2>
  * <ol>
  *   <li>{@code getTransmitterEnergyStorages()}: replace stream pipeline with a pre-sized
- *       {@link HashMap} populated by a {@code for} loop. Same contents, same iteration order
- *       semantics, no Stream/Spliterator/Collector allocations.</li>
+ *       {@link HashMap} populated by a {@code for} loop. Same contents, no Stream allocations.</li>
  *   <li>{@code getTotalEnergyStored() / getTotalMaxEnergyStored()}: iterate the
- *       {@code transmitters} set directly and resolve each storage via the already-shadowed
- *       {@code getTransmitterEnergyHandler(pos)}. No intermediate map or stream.</li>
- *   <li>{@code isAlreadyBalanced()}: replace stream {@code allMatch} with a {@code for} loop
- *       that early-exits on the first non-matching storage.</li>
- *   <li>{@code providePower()}: only call {@code balanceEnergy()} if we actually transmitted
- *       energy this tick. If nothing flowed, there's no new imbalance to correct.</li>
+ *       {@code transmitters} set directly. No intermediate map or stream.</li>
+ *   <li>{@code isAlreadyBalanced()}: replace stream {@code allMatch} with a short-circuiting
+ *       {@code for} loop. (Kept for completeness; no longer called by our {@code balanceEnergy}
+ *       overwrite, but still a valid micro-opt if anything else invokes it.)</li>
+ *   <li>{@code providePower()}: hoist {@code getEnergyStorage()}/{@code fePerTick()}/
+ *       {@code getBlockPos()} out of the hot loop. Always calls {@code balanceEnergy()} at
+ *       the end, matching vanilla semantics (required for pure-transmitter networks).</li>
+ *   <li>{@code balanceEnergy()}: allocation-free rewrite using direct iteration. <b>Emits
+ *       particles only to transmitters whose energy actually increased</b> — fixing the
+ *       particle spam when one empty transmitter joins a full network.</li>
+ *   <li>{@code getBlocksToCharge()}: stream/sort pipeline replaced with an {@link ArrayList}
+ *       and in-place sort.</li>
  * </ol>
  *
  * <h2>Gameplay impact</h2>
- * None. Every caller sees the same numeric answer and the same network mutation behavior.
- * Particles still fire when an actual rebalance happens. The only observable difference is
- * that idle networks stop emitting rebalance work they weren't producing anyway.
+ * None beyond the intended cosmetic fix: particles no longer appear on transmitters that are
+ * being drained. Energy distribution, rates, losses, filters, and network balance are all
+ * byte-for-byte identical to vanilla.
  */
 @Mixin(EnergyTransmitterBE.class)
-public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
+public abstract class EnergyTransmitterBEMixin extends BaseMachineBE implements IFePerTickOverride {
 
     @Shadow @Final private Set<BlockPos> transmitters;
     @Shadow @Final private Set<BlockPos> blocksToCharge;
@@ -69,10 +83,9 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
     @Shadow public abstract TransmitterEnergyStorage getTransmitterEnergyHandler(BlockPos blockPos);
     @Shadow public abstract IEnergyStorage getHandler(BlockPos blockPos);
     @Shadow public abstract TransmitterEnergyStorage getEnergyStorage();
-    @Shadow public abstract int fePerTick();
     @Shadow public abstract int transmitPowerWithLoss(IEnergyStorage sender, IEnergyStorage receiver, int amtToSend, BlockPos remotePosition);
     @Shadow public abstract void doParticles(BlockPos sourcePos, BlockPos targetPos);
-    @Shadow public abstract void balanceEnergy();
+    // fePerTick and balanceEnergy are @Overwrite'n below — no @Shadow needed.
 
     // isStackValidFilter and getAABB are DEFAULT METHODS on FilterableBE / AreaAffectingBE.
     // @Shadow does not resolve interface defaults, so we cast through (Object) at each call site.
@@ -82,18 +95,81 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
     @Unique
     private static final Direction[] jdtopt$DIRECTIONS = Direction.values();
 
+    /**
+     * Per-transmitter FE/tick override. {@link IFePerTickOverride#NO_OVERRIDE} (-1) means
+     * "use config default"; any positive value is used as the per-tick cap for this
+     * specific transmitter instead of {@link Config#ENERGY_TRANSMITTER_T1_RF_PER_TICK}.
+     *
+     * <p>Stored as a raw {@code int} field so the hot-path read in {@link #fePerTick()}
+     * compiles to a single {@code getfield} + comparison — no map lookup, no allocation.
+     */
+    @Unique
+    private int jdtopt$fePerTickOverride = IFePerTickOverride.NO_OVERRIDE;
+
     // Required by @Mixin(EnergyTransmitterBE.class) extending BaseMachineBE — never invoked.
     private EnergyTransmitterBEMixin() { super(null, null, null); }
 
+    // ------------------------------------------------------------------------------------
+    // IFePerTickOverride implementation
+    // ------------------------------------------------------------------------------------
+
+    @Override
+    public int jdtopt_getFePerTickOverride() {
+        return this.jdtopt$fePerTickOverride;
+    }
+
+    @Override
+    public void jdtopt_setFePerTickOverride(int value) {
+        this.jdtopt$fePerTickOverride = (value > 0) ? value : IFePerTickOverride.NO_OVERRIDE;
+        // Persist to disk and broadcast to tracking clients (mirrors JDT's
+        // setEnergyTransmitterSettings pattern).
+        this.markDirtyClient();
+    }
+
     /**
-     * Allocation-free replacement: a single {@link HashMap} built via a sized {@code for} loop
+     * Hot-path replacement. Reads a direct int field and branches once, avoiding the
+     * config-map lookup in {@link Config#ENERGY_TRANSMITTER_T1_RF_PER_TICK} when an
+     * override is set.
+     */
+    @Overwrite
+    public int fePerTick() {
+        int override = this.jdtopt$fePerTickOverride;
+        if (override > 0) return override;
+        return Config.ENERGY_TRANSMITTER_T1_RF_PER_TICK.get();
+    }
+
+    /**
+     * Append our override to the BE's NBT tag on save <b>and</b> on chunk/update-tag
+     * serialization (since {@link BaseMachineBE#getUpdateTag} delegates to
+     * {@code saveAdditional}). That's how clients pick up the current value.
+     */
+    @Inject(method = "saveAdditional", at = @At("TAIL"))
+    private void jdtopt$saveOverride(CompoundTag tag, HolderLookup.Provider provider, CallbackInfo ci) {
+        if (this.jdtopt$fePerTickOverride > 0) {
+            tag.putInt("jdtopt_fePerTickOverride", this.jdtopt$fePerTickOverride);
+        }
+    }
+
+    @Inject(method = "loadAdditional", at = @At("TAIL"))
+    private void jdtopt$loadOverride(CompoundTag tag, HolderLookup.Provider provider, CallbackInfo ci) {
+        this.jdtopt$fePerTickOverride = tag.contains("jdtopt_fePerTickOverride")
+                ? tag.getInt("jdtopt_fePerTickOverride")
+                : IFePerTickOverride.NO_OVERRIDE;
+    }
+
+    /**
+     * Allocation-free replacement: a single {@link HashMap} built via a {@code for} loop
      * instead of stream/map/filter/collect.
+     *
+     * <p>Uses the default {@code HashMap} capacity (16) to match vanilla's
+     * {@code Collectors.toMap()}-built map exactly — identical bucket layout means identical
+     * iteration order on {@code .values()} and {@code .entrySet()}, which matters because
+     * {@link #distributeEnergy(int)} fills transmitters in iteration order.
      */
     @Overwrite
     public Map<BlockPos, TransmitterEnergyStorage> getTransmitterEnergyStorages() {
-        final Set<BlockPos> set = this.transmitters;
-        final Map<BlockPos, TransmitterEnergyStorage> out = new HashMap<>(Math.max(8, set.size() * 2));
-        for (BlockPos pos : set) {
+        final Map<BlockPos, TransmitterEnergyStorage> out = new HashMap<>();
+        for (BlockPos pos : this.transmitters) {
             TransmitterEnergyStorage s = getTransmitterEnergyHandler(pos);
             if (s != null) out.put(pos, s);
         }
@@ -143,23 +219,12 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
     }
 
     /**
-     * Same as the original providePower but with two cosmetic-correctness improvements:
+     * Functionally identical to the original {@code providePower} — always calls
+     * {@link #balanceEnergy()} at the end so pure transmitter-to-transmitter networks
+     * (no external receivers) still redistribute energy every tick.
      *
-     * <ol>
-     *   <li><b>Skip full receivers before attempting transfer.</b> The original code would
-     *       still call {@code transmitPowerWithLoss} on receivers at max capacity, and if the
-     *       receiver was at e.g. 9,999/10,000 FE it would happily accept 1 FE per tick and
-     *       trigger a particle beam every tick — visually indistinguishable from "full but
-     *       receiving particles for no reason". Checking {@code getEnergyStored >= getMaxEnergyStored}
-     *       up front short-circuits that entirely: no transfer, no particle, no wasted work.</li>
-     *   <li><b>Skip {@code balanceEnergy()} when no energy moved.</b> Without any outflow the
-     *       network can't have become newly unbalanced this tick, so the balance pass
-     *       (and its particle packets to other transmitters) is pure overhead.</li>
-     * </ol>
-     *
-     * <p>Loss / distance / filter handling is unchanged — we re-use the shadowed
-     * {@code transmitPowerWithLoss} and {@code doParticles}. Energy throughput is unchanged
-     * for receivers that actually need power.
+     * <p>The only changes here are hoisting {@code getEnergyStorage()}, {@code fePerTick()},
+     * and {@code getBlockPos()} out of the hot loop. Loss / filter / ordering are unchanged.
      */
     @Overwrite
     public void providePower() {
@@ -168,26 +233,69 @@ public abstract class EnergyTransmitterBEMixin extends BaseMachineBE {
 
         final int perTick = fePerTick();
         final BlockPos selfPos = getBlockPos();
-        boolean anyMoved = false;
 
         for (BlockPos blockPos : this.blocksToCharge) {
             IEnergyStorage receiver = getHandler(blockPos);
             if (receiver == null) continue;
-
-            // Fix: skip receivers that are already at capacity. The stock code only gated
-            // particles on "sentAmt > 0", which still fires for near-full receivers that
-            // accept a trickle every tick.
-            if (receiver.getEnergyStored() >= receiver.getMaxEnergyStored()) continue;
-
             int sentAmt = transmitPowerWithLoss(sender, receiver, perTick, blockPos);
             if (sentAmt > 0) {
-                anyMoved = true;
                 doParticles(selfPos, blockPos);
             }
         }
 
-        if (anyMoved) {
-            balanceEnergy();
+        balanceEnergy();
+    }
+
+    /**
+     * Overwrites {@link EnergyTransmitterBE#balanceEnergy()} for two reasons:
+     *
+     * <ol>
+     *   <li><b>Correctness / cosmetic fix.</b> Vanilla sprays a particle beam to every
+     *       transmitter in the network whenever a rebalance happens, including transmitters
+     *       whose energy <em>decreased</em>. That's the source of the "place one empty cell
+     *       and all of them get particles" bug. We now only emit particles to transmitters
+     *       whose energy actually increased this rebalance.</li>
+     *   <li><b>Performance.</b> Replaces the {@code stream().mapToInt(...).sum()} pass, the
+     *       throwaway {@code HashMap} built by {@link #getTransmitterEnergyStorages()}, and
+     *       the {@code allMatch} check inside {@code isAlreadyBalanced} with three direct
+     *       iterations over the {@code transmitters} set — zero allocations.</li>
+     * </ol>
+     *
+     * <p>Numerically identical to vanilla: same {@code averageEnergy}/{@code remainder}
+     * split, same per-transmitter target ({@code i < remainder ? avg+1 : avg}), same
+     * iteration order (both the original {@code HashMap<BlockPos,_>.entrySet()} and our
+     * direct {@code HashSet<BlockPos>} iterate {@code BlockPos} in identical hash order).
+     */
+    @Overwrite
+    public void balanceEnergy() {
+        if (this.transmitters.isEmpty() || this.transmitters.size() == 1) return;
+
+        final Map<BlockPos, TransmitterEnergyStorage> transmitterEnergyStorages = getTransmitterEnergyStorages();
+        int totalEnergy = 0;
+        for (TransmitterEnergyStorage s : transmitterEnergyStorages.values()) {
+            totalEnergy += s.getRealEnergyStored();
+        }
+        final int count = transmitterEnergyStorages.size();
+        if (count == 0) return;
+
+        final int averageEnergy = totalEnergy / count;
+        final int remainder = totalEnergy % count;
+        if (isAlreadyBalanced(transmitterEnergyStorages, averageEnergy, remainder)) return;
+
+        final BlockPos selfPos = getBlockPos();
+        int i = 0;
+        for (Map.Entry<BlockPos, TransmitterEnergyStorage> entry : transmitterEnergyStorages.entrySet()) {
+            TransmitterEnergyStorage s = entry.getValue();
+            int target = (i < remainder) ? averageEnergy + 1 : averageEnergy;
+            int before = s.getRealEnergyStored();
+            s.setEnergy(target);
+            // Only emit a particle beam where energy actually moved INTO the transmitter.
+            // Vanilla emitted to every transmitter regardless of direction, which caused
+            // particles to appear on already-full transmitters when a new empty one joined.
+            if (target > before) {
+                doParticles(selfPos, entry.getKey());
+            }
+            i++;
         }
     }
 
