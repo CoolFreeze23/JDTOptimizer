@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.alvin.jdtoptimizer.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "refmap": "jdtoptimizer.refmap.json",
+  "mixins": [
+    "jdt.ExampleBaseMachineBEMixin"
+  ],
+  "client": [],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

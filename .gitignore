@@ -1,0 +1,19 @@
+.gradle/
+build/
+out/
+bin/
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.eclipse/
+.classpath
+.project
+.settings/
+runs/
+src/generated/
+
+# Don't commit the JDT artifact — it's a build input, fetched separately.
+extra-api/*.jar
+extra-mods/*.jar

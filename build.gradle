@@ -1,0 +1,123 @@
+plugins {
+    id 'java-library'
+    id 'idea'
+    id 'eclipse'
+    id 'net.neoforged.moddev' version '2.0.137'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+        vendor.set(JvmVendorSpec.JETBRAINS)
+    }
+}
+
+def extraModsDir = "extra-mods"
+def extraAPIDir = "extra-api"
+
+repositories {
+    mavenLocal()
+    flatDir {
+        name "extra-mods"
+        dir file(extraModsDir)
+    }
+    flatDir {
+        name "extra-api"
+        dir file(extraAPIDir)
+    }
+    maven { url = "https://maven.blamejared.com" } // patchouli/jei (JDT's optional deps)
+    maven { url = "https://www.cursemaven.com" }
+}
+
+neoForge {
+    version = project.neo_version
+
+    parchment {
+        mappingsVersion = project.parchment_mappings_version
+        minecraftVersion = project.parchment_minecraft_version
+    }
+
+    // Register our mixin config so NeoForge loads it at runtime.
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+
+    runs {
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            logLevel = org.slf4j.event.Level.DEBUG
+            gameDirectory = file("runs/${name}")
+            // Mixin debug output — comment out once stable.
+            systemProperty 'mixin.debug.export', 'true'
+            systemProperty 'mixin.debug.verify', 'true'
+        }
+
+        client {
+            client()
+            programArguments.addAll '--username', 'DevPlayer'
+        }
+
+        server {
+            server()
+            programArgument '--nogui'
+        }
+
+        data {
+            data()
+            programArguments.addAll '--mod', project.mod_id, '--all',
+                    '--output', file('src/generated/resources/').getAbsolutePath(),
+                    '--existing', file('src/main/resources/').getAbsolutePath()
+        }
+    }
+}
+
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+}
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neo_version}"
+
+    // JDT is our patch target: compile-only because we don't want to redistribute it,
+    // and localRuntime so it shows up in the dev client.
+    compileOnly "extra-api:justdirethings:${jdt_version}"
+    localRuntime "extra-mods:justdirethings:${jdt_version}"
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var replaceProperties = [
+            minecraft_version   : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version         : neo_version,
+            neo_version_range   : neo_version_range,
+            loader_version_range: loader_version_range,
+            mod_id              : mod_id, mod_name: mod_name, mod_license: mod_license,
+            mod_version         : mod_version, mod_authors: mod_authors,
+            mod_description     : mod_description,
+            jdt_version         : jdt_version,
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/neoforge.mods.toml']) {
+        expand replaceProperties + [project: project]
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
