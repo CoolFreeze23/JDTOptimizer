@@ -6,10 +6,14 @@
   "refmap": "jdtoptimizer.refmap.json",
   "mixins": [
     "jdt.BaseMachineBEMixin",
+    "jdt.BlockBreakerT1BEMixin",
     "jdt.BlockBreakerT2BEMixin",
+    "jdt.BlockPlacerT2BEMixin",
+    "jdt.BlockSwapperT2BEMixin",
     "jdt.ClickerT2BEMixin",
     "jdt.EnergyTransmitterBEMixin",
     "jdt.FluidCollectorT2BEMixin",
+    "jdt.FluidPlacerT2BEMixin",
     "jdt.PoweredMachineBEMixin",
     "jdt.RedstoneControlledBEMixin"
   ],
