@@ -5,7 +5,10 @@
   "compatibilityLevel": "JAVA_21",
   "refmap": "jdtoptimizer.refmap.json",
   "mixins": [
-    "jdt.ExampleBaseMachineBEMixin"
+    "jdt.BaseMachineBEMixin",
+    "jdt.ClickerT2BEMixin",
+    "jdt.EnergyTransmitterBEMixin",
+    "jdt.FluidCollectorT2BEMixin"
   ],
   "client": [],
   "server": [],
