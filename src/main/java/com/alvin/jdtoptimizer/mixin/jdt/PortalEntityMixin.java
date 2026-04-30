@@ -7,6 +7,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
@@ -64,9 +65,16 @@ public abstract class PortalEntityMixin extends Entity {
     @Shadow public abstract boolean isValidEntity(Entity entity);
     @Shadow public abstract void tickCooldowns();
     @Shadow public abstract void tickDying();
-    @Shadow public final Map<UUID, Integer> entityVelocityCooldowns = null;
-    @Shadow public final Map<UUID, Vec3> entityLastPosition = null;
-    @Shadow public final Map<UUID, Vec3> entityLastLastPosition = null;
+    // IMPORTANT: these three fields are declared `public final Map<...> = new HashMap<>()`
+    // in PortalEntity.java. Shadowing them as `public final ... = null` would cause Mixin
+    // to splice that `null` initializer into the target class's <init>, nuking JDT's
+    // HashMap construction at runtime (NPE on tickCooldowns). Using `@Final` (the Mixin
+    // annotation, not the Java keyword) with NO initializer is the correct pattern: it
+    // tells the Mixin AP the target field is final, without Java requiring an initializer
+    // in the shadow declaration.
+    @Shadow @Final public Map<UUID, Integer> entityVelocityCooldowns;
+    @Shadow @Final public Map<UUID, Vec3> entityLastPosition;
+    @Shadow @Final public Map<UUID, Vec3> entityLastLastPosition;
 
     /**
      * One-shot flag guarding the first-tick {@code refreshDimensions()} call. Upstream
